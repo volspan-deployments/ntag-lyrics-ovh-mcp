@@ -16,15 +16,14 @@ BASE_URL = "https://api.lyrics.ovh"
 @mcp.tool()
 async def get_lyrics(artist: str, title: str) -> dict:
     """Fetch the full lyrics for a specific song by artist name and song title.
-    Use this when the user wants to read, display, or analyze the lyrics of a known song.
-    Returns the complete lyrics text or an error if not found.
+    Use this when the user wants to read, quote, or analyze the lyrics of a known song.
+    Returns the complete lyrics text or a 404 error if not found.
     Lyrics are sourced from multiple providers (Genius, AZLyrics, etc.) in parallel.
     """
-    url = f"{BASE_URL}/v1/{httpx.URL(artist).path}/{httpx.URL(title).path}"
-    # Build URL manually with proper encoding
-    encoded_artist = httpx.URL("").copy_with(path=artist)
-    encoded_title = httpx.URL("").copy_with(path=title)
-
+    url = f"{BASE_URL}/v1/{httpx.URL('').copy_with()}"
+    # Build URL manually to handle special characters properly
+    encoded_artist = httpx.URL("").copy_with()
+    
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             response = await client.get(
@@ -34,17 +33,18 @@ async def get_lyrics(artist: str, title: str) -> dict:
             if response.status_code == 404:
                 return {
                     "success": False,
-                    "error": "No lyrics found for this song.",
+                    "error": "No lyrics found for this artist and song title.",
                     "artist": artist,
                     "title": title
                 }
-            if response.status_code != 200:
+            if response.status_code == 400:
                 return {
                     "success": False,
-                    "error": f"API returned status {response.status_code}",
+                    "error": "Invalid artist or title provided.",
                     "artist": artist,
                     "title": title
                 }
+            response.raise_for_status()
             data = response.json()
             if "error" in data:
                 return {
@@ -59,178 +59,91 @@ async def get_lyrics(artist: str, title: str) -> dict:
                 "title": title,
                 "lyrics": data.get("lyrics", "")
             }
-        except httpx.RequestError as e:
+        except httpx.TimeoutException:
             return {
                 "success": False,
-                "error": f"Request failed: {str(e)}",
+                "error": "Request timed out while fetching lyrics. Please try again.",
+                "artist": artist,
+                "title": title
+            }
+        except httpx.HTTPStatusError as e:
+            return {
+                "success": False,
+                "error": f"HTTP error {e.response.status_code} while fetching lyrics.",
+                "artist": artist,
+                "title": title
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Unexpected error: {str(e)}",
                 "artist": artist,
                 "title": title
             }
 
 
 @mcp.tool()
-async def suggest_songs(query: str, limit: int = 5) -> dict:
-    """Search for songs and artists matching a free-text search term using the Deezer search backend.
-    Use this when the user wants to discover songs, find the correct spelling of an artist or title,
-    or browse results before fetching specific lyrics.
-    Returns a list of matching tracks with artist and title information.
+async def suggest_songs(query: str) -> dict:
+    """Search for songs and artists using a free-text search term.
+    Use this when the user is unsure of the exact artist or song title, wants to discover songs,
+    or needs to look up correct spelling. Returns a list of matching songs with artist info
+    sourced from Deezer. Use the results to then call get_lyrics with the correct artist/title.
     """
-    if limit < 1:
-        limit = 1
-    if limit > 25:
-        limit = 25
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         try:
             response = await client.get(
                 f"{BASE_URL}/suggest/{query}",
                 follow_redirects=True
             )
-            if response.status_code != 200:
-                return {
-                    "success": False,
-                    "error": f"API returned status {response.status_code}",
-                    "query": query,
-                    "results": []
-                }
+            response.raise_for_status()
             data = response.json()
+            
             if "error" in data:
                 return {
                     "success": False,
                     "error": data["error"],
-                    "query": query,
-                    "results": []
+                    "query": query
                 }
-
+            
             raw_results = data.get("data", [])
-            seen = set()
-            results = []
+            
+            # Format the results into a clean, useful structure
+            formatted_results = []
             for item in raw_results:
-                if len(results) >= limit:
-                    break
-                artist_name = item.get("artist", {}).get("name", "Unknown")
-                song_title = item.get("title", "Unknown")
-                key = f"{song_title} - {artist_name}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                results.append({
-                    "artist": artist_name,
-                    "title": song_title,
-                    "album": item.get("album", {}).get("title", ""),
+                artist_info = item.get("artist", {})
+                album_info = item.get("album", {})
+                formatted_results.append({
+                    "title": item.get("title", ""),
+                    "artist": artist_info.get("name", ""),
+                    "album": album_info.get("title", ""),
                     "duration_seconds": item.get("duration", 0),
-                    "preview_url": item.get("preview", "")
+                    "preview_url": item.get("preview", ""),
+                    "deezer_id": item.get("id", None)
                 })
-
+            
             return {
                 "success": True,
                 "query": query,
-                "total_found": data.get("total", len(raw_results)),
-                "returned": len(results),
-                "results": results
+                "total": data.get("total", len(formatted_results)),
+                "results": formatted_results
             }
-        except httpx.RequestError as e:
+        except httpx.TimeoutException:
             return {
                 "success": False,
-                "error": f"Request failed: {str(e)}",
-                "query": query,
-                "results": []
-            }
-
-
-@mcp.tool()
-async def search_and_get_lyrics(query: str) -> dict:
-    """Convenience tool that combines suggest_songs and get_lyrics in a single step.
-    Use this when the user gives a vague or partial song reference and you need to first
-    resolve the correct artist/title before fetching lyrics.
-    Searches for the best matching song then immediately retrieves its lyrics.
-    """
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        # Step 1: Search for suggestions
-        try:
-            suggest_response = await client.get(
-                f"{BASE_URL}/suggest/{query}",
-                follow_redirects=True
-            )
-            if suggest_response.status_code != 200:
-                return {
-                    "success": False,
-                    "error": f"Suggestion API returned status {suggest_response.status_code}",
-                    "query": query
-                }
-            suggest_data = suggest_response.json()
-            raw_results = suggest_data.get("data", [])
-            if not raw_results:
-                return {
-                    "success": False,
-                    "error": "No songs found matching your query.",
-                    "query": query
-                }
-
-            # Pick the first (best) result
-            best = raw_results[0]
-            artist_name = best.get("artist", {}).get("name", "")
-            song_title = best.get("title", "")
-
-            if not artist_name or not song_title:
-                return {
-                    "success": False,
-                    "error": "Could not extract artist/title from search results.",
-                    "query": query
-                }
-        except httpx.RequestError as e:
-            return {
-                "success": False,
-                "error": f"Suggestion request failed: {str(e)}",
+                "error": "Request timed out while fetching suggestions. Please try again.",
                 "query": query
             }
-
-        # Step 2: Fetch lyrics for the best match
-        try:
-            lyrics_response = await client.get(
-                f"{BASE_URL}/v1/{artist_name}/{song_title}",
-                follow_redirects=True
-            )
-            if lyrics_response.status_code == 404:
-                return {
-                    "success": False,
-                    "error": "Song was found in search but lyrics are not available.",
-                    "query": query,
-                    "artist": artist_name,
-                    "title": song_title
-                }
-            if lyrics_response.status_code != 200:
-                return {
-                    "success": False,
-                    "error": f"Lyrics API returned status {lyrics_response.status_code}",
-                    "query": query,
-                    "artist": artist_name,
-                    "title": song_title
-                }
-            lyrics_data = lyrics_response.json()
-            if "error" in lyrics_data:
-                return {
-                    "success": False,
-                    "error": lyrics_data["error"],
-                    "query": query,
-                    "artist": artist_name,
-                    "title": song_title
-                }
-            return {
-                "success": True,
-                "query": query,
-                "artist": artist_name,
-                "title": song_title,
-                "album": best.get("album", {}).get("title", ""),
-                "lyrics": lyrics_data.get("lyrics", "")
-            }
-        except httpx.RequestError as e:
+        except httpx.HTTPStatusError as e:
             return {
                 "success": False,
-                "error": f"Lyrics request failed: {str(e)}",
-                "query": query,
-                "artist": artist_name,
-                "title": song_title
+                "error": f"HTTP error {e.response.status_code} while fetching suggestions.",
+                "query": query
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Unexpected error: {str(e)}",
+                "query": query
             }
 
 
@@ -265,5 +178,6 @@ app = Starlette(
     ],
     lifespan=sse_app.lifespan,
 )
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
