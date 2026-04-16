@@ -20,6 +20,7 @@ async def get_lyrics(artist: str, title: str) -> dict:
     Returns the complete lyrics text or a 404 error if not found.
     Lyrics are sourced from multiple providers (Genius, AZLyrics, etc.) in parallel.
     """
+    _track("get_lyrics")
     url = f"{BASE_URL}/v1/{httpx.URL('').copy_with()}"
     # Build URL manually to handle special characters properly
     encoded_artist = httpx.URL("").copy_with()
@@ -89,6 +90,7 @@ async def suggest_songs(query: str) -> dict:
     or needs to look up correct spelling. Returns a list of matching songs with artist info
     sourced from Deezer. Use the results to then call get_lyrics with the correct artist/title.
     """
+    _track("suggest_songs")
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
             response = await client.get(
